@@ -22,6 +22,7 @@ const sesiones = new Map();
 const ocupados = new Set();
 const LIMITE = 47_000_000;
 const STICKER_ID = (process.env.DOWNLOAD_STICKER_ID || "").trim();
+const STICKER_ARCHIVO = path.join(__dirname, "AnimatedSticker.tgs");
 
 // Responde al sticker elegido con /stickerid para obtener su identificador.
 bot.command("stickerid", async (ctx) => {
@@ -39,17 +40,27 @@ bot.command("stickerid", async (ctx) => {
 
 // Sticker temporal mientras se descarga o convierte el archivo.
 async function mostrarSticker(ctx) {
-  if (!STICKER_ID) {
-    // Hasta que se configure el sticker, no se envían mensajes de progreso.
-    return null;
+  try {
+    // Priorizar el sticker animado que eligió el usuario.
+    await fs.access(STICKER_ARCHIVO);
+    return await ctx.replyWithSticker(new InputFile(STICKER_ARCHIVO));
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      console.error("⚠️ No se pudo usar AnimatedSticker.tgs:", error.message);
+    }
   }
 
-  try {
-    return await ctx.replyWithSticker(STICKER_ID);
-  } catch (error) {
-    console.error("⚠️ No se pudo enviar el sticker:", error.message);
-    return null;
+  // Alternativa opcional: usar un ID de sticker guardado en .env.
+  if (STICKER_ID) {
+    try {
+      return await ctx.replyWithSticker(STICKER_ID);
+    } catch (error) {
+      console.error("⚠️ No se pudo enviar el sticker alternativo:", error.message);
+    }
   }
+
+  // No mostrar mensajes de progreso si el sticker no está disponible.
+  return null;
 }
 
 async function borrarSticker(ctx, mensaje) {
