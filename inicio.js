@@ -267,10 +267,13 @@ module.exports = function configurarInicio(bot) {
             new InputFile(IMAGEN_TUTORIAL_ES),
             {
               caption:
-                "🎬 ¡Así se copia un enlace en TikTok!\n" +
-                "📩 Envíame el enlace y te mando el video.\n" +
-                "🎵 Pulsa MUSIC para recibir el audio MP3.\n" +
-                "✅ También admito enlaces públicos compatibles de Instagram y Facebook."
+                "🎬 HOW TO USE TOKIFY\n\n" +
+                "1️⃣ Open TikTok, Instagram, or Facebook.\n" +
+                "2️⃣ Tap Share and select Copy Link.\n" +
+                "3️⃣ Paste the link into this chat.\n" +
+                "4️⃣ Receive your video when available!\n\n" +
+                "🎵 Tap MUSIC to get the audio in MP3 format.\n" +
+                "✅ Download only content you have permission to use."
             }
           );
         } catch (error) {
