@@ -2,8 +2,6 @@
 require("dotenv").config();
 
 const { Bot, InputFile, InlineKeyboard } = require("grammy");
-const { execFile } = require("child_process");
-const { promisify } = require("util");
 const fs = require("fs/promises");
 const os = require("os");
 const path = require("path");
@@ -104,7 +102,7 @@ bot.command("estadisticas", async (ctx) => {
 });
 
 require("./inicio")(bot);
-const ejecutar = promisify(execFile);
+const { descargar, mensajeError } = require("./descargas");
 
 const sesiones = new Map();
 // Cola controlada: máximo 2 descargas/conversiones ejecutándose y 20 en espera.
@@ -261,48 +259,6 @@ function buscarEnlace(texto) {
   return null;
 }
 
-// Descargar video o MP3
-async function descargar(url, tipo, carpeta) {
-  const argumentos = [
-    "--no-playlist",
-    "--no-progress",
-    "--no-warnings",
-    "--max-filesize", "45M",
-    "-o", path.join(carpeta, "tokify.%(ext)s")
-  ];
-
-  if (tipo === "audio") {
-    argumentos.push(
-      "-x",
-      "--audio-format", "mp3",
-      "--audio-quality", "5"
-    );
-  } else {
-    argumentos.push("--recode-video", "mp4");
-  }
-
-  argumentos.push(url);
-
-  await ejecutar("yt-dlp", argumentos, {
-    timeout: 180000,
-    maxBuffer: 1024 * 1024,
-    windowsHide: true
-  });
-
-  const archivo = path.join(
-    carpeta,
-    tipo === "audio" ? "tokify.mp3" : "tokify.mp4"
-  );
-
-  const datos = await fs.stat(archivo);
-
-  if (datos.size > LIMITE) {
-    throw new Error("Archivo demasiado grande");
-  }
-
-  return archivo;
-}
-
 // Consulta opcional del estado de la cola.
 bot.command("estado", async (ctx) => {
   await ctx.reply(
@@ -327,7 +283,7 @@ bot.on("message:text", async (ctx) => {
         stickerTemporal = await mostrarSticker(ctx);
         carpeta = await fs.mkdtemp(path.join(os.tmpdir(), "tokify-"));
 
-        const archivo = await descargar(resultado.url, "video", carpeta);
+        const { archivo, esMp4 } = await descargar(resultado.url, "video", carpeta);
         const id = crypto.randomUUID();
         const botones = new InlineKeyboard().text("🎵 MUSIC", `music:${id}`);
 
@@ -339,17 +295,21 @@ bot.on("message:text", async (ctx) => {
           creado: Date.now()
         });
 
-        await ctx.replyWithVideo(new InputFile(archivo), {
+        const opciones = {
           caption: "🎬 Downloaded via Tokify | Video & Music",
-          supports_streaming: true,
           reply_markup: botones
-        });
+        };
+        if (esMp4) {
+          await ctx.replyWithVideo(new InputFile(archivo), {
+            ...opciones,
+            supports_streaming: true
+          });
+        } else {
+          await ctx.replyWithDocument(new InputFile(archivo), opciones);
+        }
       } catch (error) {
         console.error("❌ Error de descarga:", error);
-        await ctx.reply(
-          "❌ I couldn't download this video. Check that it is public, " +
-          "you have permission to download it and it is not too large."
-        ).catch(e => console.error("❌ Error avisando al usuario:", e));
+        await ctx.reply(mensajeError(error, "video")).catch(e => console.error("❌ Error avisando al usuario:", e));
       } finally {
         await borrarSticker(ctx, stickerTemporal);
         if (carpeta) {
@@ -404,14 +364,14 @@ bot.callbackQuery(/^music:([\da-f-]+)$/, async (ctx) => {
       try {
         stickerTemporal = await mostrarSticker(ctx);
         carpeta = await fs.mkdtemp(path.join(os.tmpdir(), "tokify-"));
-        const archivo = await descargar(sesion.enlace, "audio", carpeta);
+        const { archivo } = await descargar(sesion.enlace, "audio", carpeta);
 
         await ctx.replyWithAudio(new InputFile(archivo), {
           caption: "🎵 Downloaded via Tokify | Video & Music"
         });
       } catch (error) {
         console.error("❌ Error del MP3:", error);
-        await ctx.reply("❌ I couldn't convert this video to MP3.")
+        await ctx.reply(mensajeError(error, "audio"))
           .catch(e => console.error("❌ Error avisando al usuario:", e));
       } finally {
         await borrarSticker(ctx, stickerTemporal);
