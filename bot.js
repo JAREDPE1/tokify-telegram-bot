@@ -21,6 +21,44 @@ const ejecutar = promisify(execFile);
 const sesiones = new Map();
 const ocupados = new Set();
 const LIMITE = 47_000_000;
+const STICKER_ID = (process.env.DOWNLOAD_STICKER_ID || "").trim();
+
+// Responde al sticker elegido con /stickerid para obtener su identificador.
+bot.command("stickerid", async (ctx) => {
+  const sticker = ctx.message.reply_to_message?.sticker;
+  if (!sticker) {
+    await ctx.reply("🎨 Envíame un sticker y respóndele con /stickerid.");
+    return;
+  }
+
+  await ctx.reply(
+    "🧩 Copia este ID y agrégalo en tu archivo .env:\n" +
+    "DOWNLOAD_STICKER_ID=" + sticker.file_id
+  );
+});
+
+// Sticker temporal mientras se descarga o convierte el archivo.
+async function mostrarSticker(ctx) {
+  if (!STICKER_ID) {
+    // Hasta que se configure el sticker, no se envían mensajes de progreso.
+    return null;
+  }
+
+  try {
+    return await ctx.replyWithSticker(STICKER_ID);
+  } catch (error) {
+    console.error("⚠️ No se pudo enviar el sticker:", error.message);
+    return null;
+  }
+}
+
+async function borrarSticker(ctx, mensaje) {
+  if (!mensaje) return;
+  await ctx.api.deleteMessage(ctx.chat.id, mensaje.message_id)
+    .catch((error) => {
+      console.error("⚠️ No se pudo borrar el sticker:", error.message);
+    });
+}
 
 // Detectar enlaces de TikTok
 function buscarEnlace(texto) {
@@ -122,9 +160,15 @@ bot.on("message:text", async (ctx) => {
 
   ocupados.add(clave);
   let carpeta;
+  let stickerTemporal;
 
   try {
-    await ctx.reply("⏳ Descargando tu video...");
+    // Reaccionar directamente al enlace que envió el usuario.
+    await ctx.react("❤️").catch((error) => {
+      console.error("⚠️ Reacción no disponible:", error.message);
+    });
+
+    stickerTemporal = await mostrarSticker(ctx);
 
     carpeta = await fs.mkdtemp(
       path.join(os.tmpdir(), "tokify-")
@@ -166,6 +210,8 @@ bot.on("message:text", async (ctx) => {
     );
 
   } finally {
+    await borrarSticker(ctx, stickerTemporal);
+
     if (carpeta) {
       await fs.rm(carpeta, {
         recursive: true,
@@ -214,9 +260,10 @@ bot.callbackQuery(/^music:([\da-f-]+)$/, async (ctx) => {
 
   ocupados.add(clave);
   let carpeta;
+  let stickerTemporal;
 
   try {
-    await ctx.reply("🎵 Preparando tu música MP3...");
+    stickerTemporal = await mostrarSticker(ctx);
 
     carpeta = await fs.mkdtemp(
       path.join(os.tmpdir(), "tokify-")
@@ -243,6 +290,8 @@ bot.callbackQuery(/^music:([\da-f-]+)$/, async (ctx) => {
     );
 
   } finally {
+    await borrarSticker(ctx, stickerTemporal);
+
     if (carpeta) {
       await fs.rm(carpeta, {
         recursive: true,
