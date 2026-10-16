@@ -19,7 +19,63 @@ require("./inicio")(bot);
 const ejecutar = promisify(execFile);
 
 const sesiones = new Map();
-const ocupados = new Set();
+// Cola controlada: máximo 2 descargas/conversiones ejecutándose y 20 en espera.
+// Los manejadores de Telegram sólo programan el trabajo y responden rápido.
+const MAX_SIMULTANEAS = 2;
+const MAX_EN_ESPERA = 20;
+const MAX_ESPERA_MS = 15 * 60 * 1000;
+const cola = [];
+const usuariosEnProceso = new Set();
+let trabajosActivos = 0;
+
+function ejecutarCola() {
+  while (trabajosActivos < MAX_SIMULTANEAS && cola.length > 0) {
+    const tarea = cola.shift();
+
+    if (Date.now() - tarea.creada > MAX_ESPERA_MS) {
+      usuariosEnProceso.delete(tarea.usuario);
+      Promise.resolve()
+        .then(tarea.alExpirar)
+        .catch(error => console.error("❌ Error avisando expiración:", error));
+      continue;
+    }
+
+    trabajosActivos++;
+    console.log(`📥 Descargas activas: ${trabajosActivos}/${MAX_SIMULTANEAS}; en espera: ${cola.length}`);
+
+    // No bloqueamos la recepción de los siguientes mensajes de Telegram.
+    Promise.resolve()
+      .then(tarea.trabajo)
+      .catch(error => console.error("❌ Error inesperado en la cola:", error))
+      .finally(() => {
+        trabajosActivos--;
+        usuariosEnProceso.delete(tarea.usuario);
+        ejecutarCola();
+      });
+  }
+}
+
+function ponerEnCola(usuario, trabajo, alExpirar) {
+  if (usuariosEnProceso.has(usuario)) return { ok: false, motivo: "ocupado" };
+  if (trabajosActivos >= MAX_SIMULTANEAS && cola.length >= MAX_EN_ESPERA) {
+    return { ok: false, motivo: "llena" };
+  }
+
+  const enEspera = trabajosActivos >= MAX_SIMULTANEAS;
+  usuariosEnProceso.add(usuario);
+  cola.push({ usuario, trabajo, alExpirar, creada: Date.now() });
+  ejecutarCola();
+  return { ok: true, enEspera };
+}
+
+// Las sesiones de botones MUSIC caducan tras 30 minutos.
+setInterval(() => {
+  const ahora = Date.now();
+  for (const [id, sesion] of sesiones) {
+    if (ahora - sesion.creado > 30 * 60 * 1000) sesiones.delete(id);
+  }
+}, 5 * 60 * 1000).unref();
+
 const LIMITE = 47_000_000;
 const STICKER_ID = (process.env.DOWNLOAD_STICKER_ID || "").trim();
 const STICKER_ARCHIVO = path.join(__dirname, "AnimatedSticker.tgs");
@@ -159,167 +215,134 @@ async function descargar(url, tipo, carpeta) {
   return archivo;
 }
 
-// Recibir enlaces automáticamente
-bot.on("message:text", async (ctx) => {
-  const resultado = buscarEnlace(ctx.message.text);
-
-  if (!resultado) {
-    await ctx.reply(
-      "📩 Envíame un enlace de video público de TikTok, Instagram o Facebook."
-    );
-    return;
-  }
-
-  const clave = `${ctx.chat.id}:${ctx.from.id}`;
-
-  if (ocupados.has(clave)) {
-    await ctx.reply("⏳ Espera a que termine tu descarga.");
-    return;
-  }
-
-  ocupados.add(clave);
-  let carpeta;
-  let stickerTemporal;
-
-  try {
-    // Reaccionar directamente al enlace que envió el usuario.
-    await ctx.react("❤️").catch((error) => {
-      console.error("⚠️ Reacción no disponible:", error.message);
-    });
-
-    stickerTemporal = await mostrarSticker(ctx);
-
-    carpeta = await fs.mkdtemp(
-      path.join(os.tmpdir(), "tokify-")
-    );
-
-    const archivo = await descargar(
-      resultado.url,
-      "video",
-      carpeta
-    );
-
-    const id = crypto.randomUUID();
-
-    const botones = new InlineKeyboard()
-      .text("🎵 MUSIC", `music:${id}`);
-
-    sesiones.set(id, {
-      enlace: resultado.url,
-      plataforma: resultado.plataforma,
-      usuario: ctx.from.id,
-      chat: ctx.chat.id,
-      creado: Date.now()
-    });
-
-    await ctx.replyWithVideo(
-      new InputFile(archivo),
-      {
-        caption: "🎬 Downloaded via Tokify | Video & Music",
-        supports_streaming: true,
-        reply_markup: botones
-      }
-    );
-
-  } catch (error) {
-    console.error("❌ Error de descarga:", error);
-
-    await ctx.reply(
-      "❌ No pude descargar este video.\n" +
-      "Comprueba que sea público, que tengas permiso para descargarlo y que no exceda el límite. Instagram y Facebook pueden exigir inicio de sesión."
-    );
-
-  } finally {
-    await borrarSticker(ctx, stickerTemporal);
-
-    if (carpeta) {
-      await fs.rm(carpeta, {
-        recursive: true,
-        force: true
-      }).catch(() => {});
-    }
-
-    ocupados.delete(clave);
-  }
+// Consulta opcional del estado de la cola.
+bot.command("estado", async (ctx) => {
+  await ctx.reply(
+    `📊 Tokify\n⚡ Descargas activas: ${trabajosActivos}/${MAX_SIMULTANEAS}\n⏳ En espera: ${cola.length}/${MAX_EN_ESPERA}`
+  );
 });
 
-// Botón para descargar música
+// Recibir enlaces de TikTok, Instagram y Facebook sin bloquear el polling.
+bot.on("message:text", async (ctx) => {
+  const resultado = buscarEnlace(ctx.message.text);
+  if (!resultado) {
+    await ctx.reply("📩 Send a public TikTok, Instagram or Facebook video link.");
+    return;
+  }
+
+  const respuesta = ponerEnCola(
+    String(ctx.from.id),
+    async () => {
+      let carpeta;
+      let stickerTemporal;
+      try {
+        stickerTemporal = await mostrarSticker(ctx);
+        carpeta = await fs.mkdtemp(path.join(os.tmpdir(), "tokify-"));
+
+        const archivo = await descargar(resultado.url, "video", carpeta);
+        const id = crypto.randomUUID();
+        const botones = new InlineKeyboard().text("🎵 MUSIC", `music:${id}`);
+
+        sesiones.set(id, {
+          enlace: resultado.url,
+          plataforma: resultado.plataforma,
+          usuario: ctx.from.id,
+          chat: ctx.chat.id,
+          creado: Date.now()
+        });
+
+        await ctx.replyWithVideo(new InputFile(archivo), {
+          caption: "🎬 Downloaded via Tokify | Video & Music",
+          supports_streaming: true,
+          reply_markup: botones
+        });
+      } catch (error) {
+        console.error("❌ Error de descarga:", error);
+        await ctx.reply(
+          "❌ I couldn't download this video. Check that it is public, " +
+          "you have permission to download it and it is not too large."
+        ).catch(e => console.error("❌ Error avisando al usuario:", e));
+      } finally {
+        await borrarSticker(ctx, stickerTemporal);
+        if (carpeta) {
+          await fs.rm(carpeta, { recursive: true, force: true }).catch(() => {});
+        }
+      }
+    },
+    async () => {
+      await ctx.reply("⌛ Your request waited too long. Please send the link again.");
+    }
+  );
+
+  if (!respuesta.ok) {
+    await ctx.reply(
+      respuesta.motivo === "ocupado"
+        ? "⏳ You already have a download or conversion in progress or in the queue."
+        : "🚦 Tokify is busy. The download queue is full; please try again later."
+    );
+    return;
+  }
+
+  // Reacción rápida al enlace, sin esperar que termine la descarga.
+  ctx.react("❤️").catch(error => {
+    console.error("⚠️ No se pudo reaccionar al mensaje:", error.message);
+  });
+});
+
+// Botón MUSIC: usa la misma cola para no saturar la CPU con conversiones.
 bot.callbackQuery(/^music:([\da-f-]+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
 
   const id = ctx.match[1];
   const sesion = sesiones.get(id);
 
-  if (
-    !sesion ||
-    Date.now() - sesion.creado > 30 * 60 * 1000
-  ) {
+  if (!sesion || Date.now() - sesion.creado > 30 * 60 * 1000) {
     sesiones.delete(id);
-    await ctx.reply(
-      "⌛ El botón expiró. Envía nuevamente el enlace."
-    );
+    await ctx.reply("⌛ This button expired. Please send the link again.");
     return;
   }
 
-  if (
-    ctx.from.id !== sesion.usuario ||
-    ctx.chat.id !== sesion.chat
-  ) {
-    await ctx.reply(
-      "🔒 Este botón pertenece al usuario que envió el enlace."
-    );
+  if (ctx.from.id !== sesion.usuario || ctx.chat.id !== sesion.chat) {
+    await ctx.reply("🔒 This button belongs to the user who sent the link.");
     return;
   }
 
-  const clave = `${ctx.chat.id}:${ctx.from.id}`;
+  const respuesta = ponerEnCola(
+    String(ctx.from.id),
+    async () => {
+      let carpeta;
+      let stickerTemporal;
 
-  if (ocupados.has(clave)) {
-    await ctx.reply("⏳ Ya tienes una descarga en proceso.");
-    return;
-  }
+      try {
+        stickerTemporal = await mostrarSticker(ctx);
+        carpeta = await fs.mkdtemp(path.join(os.tmpdir(), "tokify-"));
+        const archivo = await descargar(sesion.enlace, "audio", carpeta);
 
-  ocupados.add(clave);
-  let carpeta;
-  let stickerTemporal;
-
-  try {
-    stickerTemporal = await mostrarSticker(ctx);
-
-    carpeta = await fs.mkdtemp(
-      path.join(os.tmpdir(), "tokify-")
-    );
-
-    const archivo = await descargar(
-      sesion.enlace,
-      "audio",
-      carpeta
-    );
-
-    await ctx.replyWithAudio(
-      new InputFile(archivo),
-      {
-        caption: "🎵 Downloaded via Tokify | Video & Music"
+        await ctx.replyWithAudio(new InputFile(archivo), {
+          caption: "🎵 Downloaded via Tokify | Video & Music"
+        });
+      } catch (error) {
+        console.error("❌ Error del MP3:", error);
+        await ctx.reply("❌ I couldn't convert this video to MP3.")
+          .catch(e => console.error("❌ Error avisando al usuario:", e));
+      } finally {
+        await borrarSticker(ctx, stickerTemporal);
+        if (carpeta) {
+          await fs.rm(carpeta, { recursive: true, force: true }).catch(() => {});
+        }
       }
-    );
-
-  } catch (error) {
-    console.error("❌ Error del MP3:", error);
-
-    await ctx.reply(
-      "❌ No pude convertir este video a MP3."
-    );
-
-  } finally {
-    await borrarSticker(ctx, stickerTemporal);
-
-    if (carpeta) {
-      await fs.rm(carpeta, {
-        recursive: true,
-        force: true
-      }).catch(() => {});
+    },
+    async () => {
+      await ctx.reply("⌛ Your MP3 request waited too long. Please try again.");
     }
+  );
 
-    ocupados.delete(clave);
+  if (!respuesta.ok) {
+    await ctx.reply(
+      respuesta.motivo === "ocupado"
+        ? "⏳ You already have a download or conversion in progress or in the queue."
+        : "🚦 Tokify is busy. The download queue is full; please try again later."
+    );
   }
 });
 
