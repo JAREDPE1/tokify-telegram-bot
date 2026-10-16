@@ -4,7 +4,7 @@ const path = require("path");
 const { InlineKeyboard, InputFile } = require("grammy");
 
 const ARCHIVO = path.join(__dirname, "idiomas.json");
-const VIDEO = path.join(__dirname, "tutorial.mp4");
+const IMAGEN_TUTORIAL_ES = path.join(__dirname, "tutorial_tiktok.png");
 
 const idiomas = [
   ["es", "🇪🇸 Español"],
@@ -258,22 +258,28 @@ module.exports = function configurarInicio(bot) {
         `✅ ${nombre}`
       );
 
-      // Video tutorial opcional
-      if (fs.existsSync(VIDEO)) {
+      // En español: usar la imagen de guía en lugar del tutorial largo.
+      // En otros idiomas: mantener el texto traducido hasta crear
+      // sus respectivas imágenes.
+      if (idioma === "es" && fs.existsSync(IMAGEN_TUTORIAL_ES)) {
         try {
-          await ctx.replyWithVideo(
-            new InputFile(VIDEO),
-            { caption: "🎬 Tokify Tutorial" }
+          await ctx.replyWithPhoto(
+            new InputFile(IMAGEN_TUTORIAL_ES),
+            {
+              caption:
+                "🎬 ¡Así se copia un enlace en TikTok!\n" +
+                "📩 Envíame el enlace y te mando el video.\n" +
+                "🎵 Pulsa MUSIC para recibir el audio MP3.\n" +
+                "✅ También admito enlaces públicos compatibles de Instagram y Facebook."
+            }
           );
         } catch (error) {
-          console.error(
-            "Error enviando tutorial:", error.message
-          );
+          console.error("❌ No se pudo enviar la imagen tutorial:", error.message);
+          await ctx.reply(tutoriales[idioma]);
         }
+      } else {
+        await ctx.reply(tutoriales[idioma]);
       }
-
-      // Tutorial traducido
-      await ctx.reply(tutoriales[idioma]);
 
     } catch (error) {
       console.error("Error de idioma:", error);
