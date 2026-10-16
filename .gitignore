@@ -3,3 +3,5 @@ node_modules/
 .env.*
 downloads/
 idiomas.json
+usuarios.json
+usuarios.json.tmp
