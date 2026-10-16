@@ -71,7 +71,7 @@ async function borrarSticker(ctx, mensaje) {
     });
 }
 
-// Detectar enlaces de TikTok
+// Detectar enlaces públicos de TikTok, Instagram y Facebook
 function buscarEnlace(texto) {
   const enlaces = texto.match(/https?:\/\/[^\s<>"']+/gi) || [];
 
@@ -82,15 +82,35 @@ function buscarEnlace(texto) {
       const url = new URL(enlace);
       const dominio = url.hostname.toLowerCase();
 
-      if (
-        ["http:", "https:"].includes(url.protocol) &&
-        (dominio === "tiktok.com" ||
-          dominio.endsWith(".tiktok.com"))
+      if (!["https:", "http:"].includes(url.protocol)) continue;
+
+      let plataforma = null;
+
+      if (dominio === "tiktok.com" || dominio.endsWith(".tiktok.com")) {
+        plataforma = "TikTok";
+      } else if (
+        dominio === "instagram.com" ||
+        dominio.endsWith(".instagram.com") ||
+        dominio === "instagr.am" ||
+        dominio.endsWith(".instagr.am")
       ) {
-        return url.href;
+        plataforma = "Instagram";
+      } else if (
+        dominio === "facebook.com" ||
+        dominio.endsWith(".facebook.com") ||
+        dominio === "fb.watch" ||
+        dominio.endsWith(".fb.watch") ||
+        dominio === "fb.com" ||
+        dominio.endsWith(".fb.com")
+      ) {
+        plataforma = "Facebook";
+      }
+
+      if (plataforma) {
+        return { url: url.href, plataforma };
       }
     } catch {
-      // Enlace no válido
+      // Enlace no válido: continuar con los demás
     }
   }
 
@@ -139,25 +159,13 @@ async function descargar(url, tipo, carpeta) {
   return archivo;
 }
 
-// Comando de bienvenida
-bot.command("start", async (ctx) => {
-  await ctx.reply(
-    "🤖 ¡Bienvenido a Tokify | Video & Music!\n\n" +
-    "🎬 Descarga videos de TikTok\n" +
-    "🎵 Convierte videos a MP3\n" +
-    "📥 Envíame un enlace de TikTok.\n\n" +
-    "✅ No necesitas escribir comandos.\n" +
-    "ℹ️ Descarga solo contenido que tengas permiso de usar."
-  );
-});
-
 // Recibir enlaces automáticamente
 bot.on("message:text", async (ctx) => {
-  const enlace = buscarEnlace(ctx.message.text);
+  const resultado = buscarEnlace(ctx.message.text);
 
-  if (!enlace) {
+  if (!resultado) {
     await ctx.reply(
-      "📩 Envíame un enlace válido de TikTok."
+      "📩 Envíame un enlace de video público de TikTok, Instagram o Facebook."
     );
     return;
   }
@@ -186,7 +194,7 @@ bot.on("message:text", async (ctx) => {
     );
 
     const archivo = await descargar(
-      enlace,
+      resultado.url,
       "video",
       carpeta
     );
@@ -197,7 +205,8 @@ bot.on("message:text", async (ctx) => {
       .text("🎵 MUSIC", `music:${id}`);
 
     sesiones.set(id, {
-      enlace,
+      enlace: resultado.url,
+      plataforma: resultado.plataforma,
       usuario: ctx.from.id,
       chat: ctx.chat.id,
       creado: Date.now()
@@ -217,7 +226,7 @@ bot.on("message:text", async (ctx) => {
 
     await ctx.reply(
       "❌ No pude descargar este video.\n" +
-      "Comprueba que sea público, descargable y no muy grande."
+      "Comprueba que sea público, que tengas permiso para descargarlo y que no exceda el límite. Instagram y Facebook pueden exigir inicio de sesión."
     );
 
   } finally {
