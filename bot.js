@@ -15,6 +15,94 @@ if (!process.env.BOT_TOKEN) {
 }
 
 const bot = new Bot(process.env.BOT_TOKEN);
+
+// Estadísticas locales: contamos usuarios únicos en chats privados.
+// Estos datos comienzan a registrarse desde que se instale esta versión.
+const fsLocal = require("fs");
+const ARCHIVO_USUARIOS = path.join(__dirname, "usuarios.json");
+const DIA = 24 * 60 * 60 * 1000;
+const AHORA = () => Date.now();
+
+let registroUsuarios;
+try {
+  registroUsuarios = JSON.parse(fsLocal.readFileSync(ARCHIVO_USUARIOS, "utf8"));
+  if (!registroUsuarios.salt || !registroUsuarios.usuarios) {
+    throw new Error("Formato de estadísticas no válido");
+  }
+} catch (error) {
+  if (error.code !== "ENOENT") {
+    console.error("⚠️ No se pudo cargar usuarios.json:", error.message);
+  }
+  registroUsuarios = {
+    inicio: new Date().toISOString(),
+    salt: crypto.randomBytes(24).toString("hex"),
+    usuarios: {}
+  };
+}
+
+// Las escrituras se serializan y usan un archivo temporal para evitar corrupción.
+let escrituraUsuarios = Promise.resolve();
+function guardarUsuarios() {
+  escrituraUsuarios = escrituraUsuarios
+    .catch(() => {})
+    .then(async () => {
+      const temporal = ARCHIVO_USUARIOS + ".tmp";
+      await fs.writeFile(temporal, JSON.stringify(registroUsuarios), {
+        mode: 0o600
+      });
+      await fs.rename(temporal, ARCHIVO_USUARIOS);
+    });
+  escrituraUsuarios.catch(error => {
+    console.error("❌ Error guardando estadísticas:", error.message);
+  });
+}
+
+function registrarUsuario(id) {
+  const clave = crypto.createHmac("sha256", registroUsuarios.salt)
+    .update(String(id))
+    .digest("hex");
+  const ahora = AHORA();
+  const previo = registroUsuarios.usuarios[clave];
+
+  // No guardar a disco por cada mensaje: actualizar como máximo cada 5 minutos.
+  if (!previo || ahora - previo >= 5 * 60 * 1000) {
+    registroUsuarios.usuarios[clave] = ahora;
+    guardarUsuarios();
+  }
+}
+
+bot.use(async (ctx, next) => {
+  if (ctx.chat?.type === "private" && ctx.from?.id && !ctx.from.is_bot) {
+    registrarUsuario(ctx.from.id);
+  }
+  await next();
+});
+
+// Este comando muestra tu propio ID (no revela el token).
+bot.command("miid", async (ctx) => {
+  await ctx.reply("🪪 Your Telegram user ID: " + ctx.from.id);
+});
+
+// Solo el dueño configurado en .env puede consultar las estadísticas.
+bot.command("estadisticas", async (ctx) => {
+  if (!process.env.BOT_ADMIN_ID ||
+      String(ctx.from?.id) !== String(process.env.BOT_ADMIN_ID)) {
+    await ctx.reply("🔒 Statistics are only available to the bot owner.");
+    return;
+  }
+
+  const visitas = Object.values(registroUsuarios.usuarios);
+  const fechaLimite = AHORA() - 30 * DIA;
+  const mes = visitas.filter(fecha => fecha >= fechaLimite).length;
+  await ctx.reply(
+    "📊 TOKIFY — Bot Statistics\n\n" +
+    "👥 Total users recorded: " + visitas.length + "\n" +
+    "📅 Active in last 30 days: " + mes + "\n" +
+    "🗓️ Tracking started: " + registroUsuarios.inicio.slice(0, 10) + "\n\n" +
+    "ℹ️ These are local counts, not Telegram's official monthly-user metric."
+  );
+});
+
 require("./inicio")(bot);
 const ejecutar = promisify(execFile);
 
